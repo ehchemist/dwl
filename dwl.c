@@ -12,6 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
+#include <wayland-util.h>
 #include <wlr/backend.h>
 #include <wlr/backend/libinput.h>
 #include <wlr/render/allocator.h>
@@ -134,6 +135,7 @@ typedef struct {
 	struct wl_listener associate;
 	struct wl_listener dissociate;
 	struct wl_listener configure;
+    struct wl_listener minimize;
 	struct wl_listener set_hints;
 #endif
 	unsigned int bw;
@@ -250,6 +252,7 @@ static void arrangelayers(Monitor *m);
 static void axisnotify(struct wl_listener *listener, void *data);
 static void buttonpress(struct wl_listener *listener, void *data);
 static void chvt(const Arg *arg);
+static void centeredmaster(Monitor *m);
 static void checkidleinhibitor(struct wlr_surface *exclude);
 static void cleanup(void);
 static void cleanupmon(struct wl_listener *listener, void *data);
@@ -300,6 +303,7 @@ static void killclient(const Arg *arg);
 static void locksession(struct wl_listener *listener, void *data);
 static void mapnotify(struct wl_listener *listener, void *data);
 static void maximizenotify(struct wl_listener *listener, void *data);
+static void minimizenotify(struct wl_listener *listener, void *data);
 static void monocle(Monitor *m);
 static void motionabsolute(struct wl_listener *listener, void *data);
 static void motionnotify(uint32_t time, struct wlr_input_device *device, double sx,
@@ -677,6 +681,54 @@ void
 chvt(const Arg *arg)
 {
 	wlr_session_change_vt(session, arg->ui);
+}
+
+void
+centeredmaster(Monitor *m)
+{
+    unsigned int mw, mx, oty, ety, tw;
+    int i, n = 0;
+    Client *c;
+
+    wl_list_for_each(c, &clients, link)
+		if (VISIBLEON(c, m) && !c->isfloating && !c->isfullscreen)
+			n++;
+	if (n == 0)
+		return;
+
+    mw = m->nmaster ? (int)roundf(m->w.width * m->mfact) : 0;
+    mx = (m->w.width - mw) / 2;
+    tw = (m->m.width - mw) / 2;
+
+    i = oty = ety = 0;
+    wl_list_for_each(c, &clients, link) {
+		if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
+			continue;
+        if (i < m->nmaster) {
+            resize(c, (struct wlr_box){.x = m->w.x + mx,
+                    .y = m->w.y,
+                    .width = mw / (MIN(n, m->nmaster)),
+                    .height = m->w.height},
+                    0);
+            mx += c->geom.width; // width needs to be increasing when mfact increases! -> maybe fixed by new .width
+        } else {
+            if ((i - m->nmaster) % 2 ) {
+                resize(c, (struct wlr_box){.x = m->w.x + tw + mw,
+                        .y = m->w.y + ety,
+                        .width = tw,
+                        .height = (m->w.height - ety) / ( (1 + n - i) / 2)},
+                        0);
+                ety += c->geom.height;
+            } else {
+                resize(c, (struct wlr_box){.x = m->w.x,
+                        .y = m->w.y + oty,
+                        .width = tw,
+                        .height = (m->w.height - oty) / ( (1 + n - i) / 2)},
+                        0);
+                oty += c->geom.height;
+            }
+        }
+    }
 }
 
 void
@@ -1339,6 +1391,7 @@ destroynotify(struct wl_listener *listener, void *data)
 		wl_list_remove(&c->associate.link);
 		wl_list_remove(&c->configure.link);
 		wl_list_remove(&c->dissociate.link);
+        wl_list_remove(&c->minimize.link);
 		wl_list_remove(&c->set_hints.link);
 	} else
 #endif
@@ -1779,8 +1832,12 @@ mapnotify(struct wl_listener *listener, void *data)
 	c->geom.width += 2 * c->bw;
 	c->geom.height += 2 * c->bw;
 
-	/* Insert this client into client lists. */
-	wl_list_insert(&clients, &c->link);
+	/* Insert this client into client lists. Patched to attachbottom*/
+    if (clients.prev)
+        wl_list_insert(clients.prev, &c->link);
+    else
+        wl_list_insert(&clients, &c->link);
+
 	wl_list_insert(&fstack, &c->flink);
 
 	/* Set initial monitor, tags, floating status, and focus:
@@ -1819,6 +1876,21 @@ maximizenotify(struct wl_listener *listener, void *data)
 			&& wl_resource_get_version(c->surface.xdg->toplevel->resource)
 					< XDG_TOPLEVEL_WM_CAPABILITIES_SINCE_VERSION)
 		wlr_xdg_surface_schedule_configure(c->surface.xdg);
+}
+
+void
+minimizenotify(struct wl_listener *listener, void *data)
+{
+    Client *c = wl_container_of(listener, c, minimize);
+	struct wlr_xwayland_surface *xsurface = c->surface.xwayland;
+	struct wlr_xwayland_minimize_event *e = data;
+	int focused;
+
+	if (xsurface->surface == NULL || !xsurface->surface->mapped)
+		return;
+
+	focused = seat->keyboard_state.focused_surface == xsurface->surface;
+	wlr_xwayland_surface_set_minimized(xsurface, !focused && e->minimize);
 }
 
 void
@@ -3138,6 +3210,7 @@ createnotifyx11(struct wl_listener *listener, void *data)
 	LISTEN(&xsurface->events.associate, &c->associate, associatex11);
 	LISTEN(&xsurface->events.destroy, &c->destroy, destroynotify);
 	LISTEN(&xsurface->events.dissociate, &c->dissociate, dissociatex11);
+    LISTEN(&xsurface->events.request_minimize, &c->minimize, minimizenotify);
 	LISTEN(&xsurface->events.request_activate, &c->activate, activatex11);
 	LISTEN(&xsurface->events.request_configure, &c->configure, configurex11);
 	LISTEN(&xsurface->events.request_fullscreen, &c->fullscreen, fullscreennotify);
