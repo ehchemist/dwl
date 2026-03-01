@@ -736,14 +736,14 @@ centeredmaster(Monitor *m)
             mx += c->geom.width; // width needs to be increasing when mfact increases! -> maybe fixed by new .width
         } else {
             if ((i + 1 - m->nmaster) % 2 ) {
-                resize(c, (struct wlr_box){.x = m->w.x + tw + mw,
+                resize(c, (struct wlr_box){.x = m->w.x,
                         .y = m->w.y + ety,
                         .width = tw,
                         .height = (m->w.height - ety) / ( (1 + n - i) / 2)},
                         0);
                 ety += c->geom.height;
             } else {
-                resize(c, (struct wlr_box){.x = m->w.x,
+                resize(c, (struct wlr_box){.x = m->w.x + tw + mw,
                         .y = m->w.y + oty,
                         .width = tw,
                         .height = (m->w.height - oty) / ( (1 + n - i) / 2)},
